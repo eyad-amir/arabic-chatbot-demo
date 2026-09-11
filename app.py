@@ -1,53 +1,125 @@
+import json
+import re
+from pathlib import Path
+from typing import Any
+
 import streamlit as st
-import google.generativeai as genai
 
-# Safely fetch API Key from Streamlit Secrets or fallback for local testing
-if "GEMINI_API_KEY" in st.secrets:
-    api_key = st.secrets["GEMINI_API_KEY"]
-else:
-    api_key = "YOUR_LOCAL_API_KEY_HERE" # Fallback for local testing
 
-genai.configure(api_key=api_key)
+FALLBACK_MESSAGE = "عذراً، ليس لدي معلومات حول هذا الأمر. يرجى التواصل مع خدمة العملاء."
+PROJECT_DIR = Path(__file__).resolve().parent
 
-# 2. Load your knowledge base
-with open('knowledge_base.json', 'r', encoding='utf-8') as file:
-    kb_data = file.read()
 
-# 3. Give the AI its strict instructions
-system_instruction = f"""
-You are a helpful customer service assistant for Al-Areej Perfumes. 
-You MUST answer users in Arabic.
-ONLY use the information in this knowledge base to answer questions:
-{kb_data}
-If the user asks something not in the knowledge base, say exactly: 'عذراً، ليس لدي معلومات حول هذا الأمر. يرجى التواصل مع خدمة العملاء.'
-"""
+def load_knowledge_base() -> list[dict[str, str]] | None:
+    """Load and validate FAQ entries from the local knowledge base."""
+    knowledge_base_path = PROJECT_DIR / "knowledge_base.json"
+    try:
+        with knowledge_base_path.open("r", encoding="utf-8") as file:
+            knowledge_base: Any = json.load(file)
+    except FileNotFoundError:
+        st.error("تعذر العثور على ملف قاعدة المعرفة knowledge_base.json.")
+        return None
+    except json.JSONDecodeError:
+        st.error("ملف قاعدة المعرفة يحتوي على JSON غير صالح.")
+        return None
+    except OSError:
+        st.error("تعذر قراءة ملف قاعدة المعرفة.")
+        return None
 
-model = genai.GenerativeModel(
-    model_name="gemini-3.6-flash",
-    system_instruction=system_instruction
-)
+    if not isinstance(knowledge_base, dict) or not knowledge_base:
+        st.error("قاعدة المعرفة فارغة أو بتنسيق غير صالح.")
+        return None
 
-# 4. Streamlit UI Setup
-st.title("🤖 عطور الأريج - خدمة العملاء")
-st.write("أهلاً بك! كيف يمكنني مساعدتك اليوم؟")
+    entries = knowledge_base.get("knowledge_base")
+    if not isinstance(entries, list) or not entries or not all(
+        isinstance(entry, dict)
+        and isinstance(entry.get("question"), str)
+        and isinstance(entry.get("answer"), str)
+        and entry["question"].strip()
+        and entry["answer"].strip()
+        for entry in entries
+    ):
+        st.error("قاعدة المعرفة لا تحتوي على معلومات صالحة.")
+        return None
 
-# 5. Initialize chat history in Streamlit memory
-if "chat_session" not in st.session_state:
-    st.session_state.chat_session = model.start_chat()
+    return entries
 
-# Display previous chat messages
-for message in st.session_state.chat_session.history:
-    role = "user" if message.role == "user" else "assistant"
-    with st.chat_message(role):
-        st.markdown(message.parts[0].text)
 
-# 6. Chat input box
-if user_input := st.chat_input("اكتب سؤالك هنا..."):
-    # Show user message on screen
-    with st.chat_message("user"):
-        st.markdown(user_input)
-    
-    # Get bot response and show it
-    with st.chat_message("assistant"):
-        response = st.session_state.chat_session.send_message(user_input)
-        st.markdown(response.text)
+def normalize_arabic(text: str) -> str:
+    """Normalize Arabic text to make FAQ matching tolerant of punctuation."""
+    text = text.lower()
+    text = re.sub(r"[ًٌٍَُِّْـ]", "", text)
+    text = re.sub(r"[إأآا]", "ا", text)
+    text = re.sub(r"[ؤئ]", "ء", text)
+    text = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
+    return " ".join(text.split())
+
+
+def answer_from_knowledge_base(
+    user_input: str, entries: list[dict[str, str]]
+) -> str:
+    """Return an answer only when a local FAQ entry is a confident match."""
+    normalized_input = normalize_arabic(user_input)
+    if not normalized_input:
+        return FALLBACK_MESSAGE
+
+    input_words = set(normalized_input.split())
+    best_entry: dict[str, str] | None = None
+    best_score = 0.0
+
+    for entry in entries:
+        question = normalize_arabic(entry["question"])
+        if normalized_input == question or normalized_input in question or question in normalized_input:
+            return entry["answer"]
+
+        question_words = set(question.split())
+        score = len(input_words & question_words) / max(len(question_words), 1)
+        if score > best_score:
+            best_score = score
+            best_entry = entry
+
+    if best_entry is not None and best_score >= 0.5:
+        return best_entry["answer"]
+    return FALLBACK_MESSAGE
+
+
+def display_chat_history() -> None:
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+
+def get_response_text(response: Any) -> str:
+    """Return usable response text, or the required fallback message."""
+    response_text = getattr(response, "text", None)
+    if isinstance(response_text, str) and response_text.strip():
+        return response_text.strip()
+    return FALLBACK_MESSAGE
+
+
+def main() -> None:
+    st.title("🤖 عطور الأريج - خدمة العملاء")
+    st.write("أهلاً بك! كيف يمكنني مساعدتك اليوم؟")
+
+    entries = load_knowledge_base()
+    if entries is None:
+        st.stop()
+
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    display_chat_history()
+
+    if user_input := st.chat_input("اكتب سؤالك هنا..."):
+        st.session_state.messages.append({"role": "user", "content": user_input})
+        with st.chat_message("user"):
+            st.markdown(user_input)
+
+        with st.chat_message("assistant"):
+            answer = answer_from_knowledge_base(user_input, entries)
+            st.session_state.messages.append({"role": "assistant", "content": answer})
+            st.markdown(answer)
+
+
+if __name__ == "__main__":
+    main()
