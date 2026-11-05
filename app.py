@@ -1,125 +1,76 @@
-import json
-import re
+"""Arabic customer-support portfolio demo with a local FAQ file."""
 from pathlib import Path
-from typing import Any
-
 import streamlit as st
+from engine import load_knowledge_base, answer_from_knowledge_base
 
+st.set_page_config(page_title="الأريج | مساعد المتجر", page_icon="✦", layout="wide")
+st.markdown("""
+<style>
+html, body, [class*="st-"] {font-family:Tahoma,Arial,sans-serif;}
+.stApp {background:#f8f6f1;color:#202b29;}
+[data-testid="stMainBlockContainer"] {max-width:1040px;padding-top:2.4rem;padding-bottom:2rem;}
+[data-testid="stSidebar"] {background:#152e29;color:#f6f0df;direction:rtl;border-left:1px solid #bfa66a;}
+[data-testid="stSidebar"] p,[data-testid="stSidebar"] h2,[data-testid="stSidebar"] h3 {color:#f6f0df;}
+[data-testid="stSidebar"] .stButton button {background:#254039;color:#f5eedc;border:1px solid #5a6c56;}
+[data-testid="stSidebar"] .stDownloadButton button {background:#bfa66a;color:#152e29;border:0;}
+[data-testid="stChatMessage"] {direction:rtl;text-align:right;background:white;border:1px solid #e9e3d5;border-radius:18px;padding:1.25rem;margin-bottom:1rem;}
+[data-testid="stChatMessage"] p {line-height:2;}
+[data-testid="stChatInput"] {direction:rtl;border:1px solid #bfa66a;border-radius:14px;}
+.hero {direction:rtl;text-align:right;padding:28px 32px;background:#152e29;border-radius:22px;color:#fff9e9;margin-bottom:20px;}
+.hero .eyebrow {color:#d7bf82;font-size:13px;letter-spacing:1px;}
+.hero h1 {color:#fff9e9;font-size:36px;font-weight:800;margin:12px 0;}
+.hero p {color:#d7ded6;line-height:1.9;font-size:15px;margin:0;}
+.badge {display:inline-block;border:1px solid #65735a;border-radius:30px;padding:5px 13px;font-size:11px;color:#d9ccaa;margin-top:18px;}
+.section-label {direction:rtl;text-align:right;font-weight:700;font-size:14px;margin:20px 0 12px;color:#58645b;}
+.side-brand {font-size:42px;font-weight:800;color:#d6bd80;margin-top:24px;}
+.side-en {font-size:11px;letter-spacing:4px;color:#b4c2b6;margin-bottom:30px;}
+.side-note {border-top:1px solid #496058;margin-top:28px;padding-top:20px;font-size:12px;color:#b7c5bb;line-height:2;}
+.stButton button {border-radius:12px;border:1px solid #dfd7c3;background:#fffdf7;color:#294238;min-height:48px;}
+.stButton button:hover {border-color:#a58b4e;color:#152e29;}
+header {background:transparent!important;}
+</style>""", unsafe_allow_html=True)
 
-FALLBACK_MESSAGE = "عذراً، ليس لدي معلومات حول هذا الأمر. يرجى التواصل مع خدمة العملاء."
-PROJECT_DIR = Path(__file__).resolve().parent
+try:
+    data = load_knowledge_base(Path(__file__).with_name("knowledge_base.json"))
+except (OSError, ValueError):
+    st.error("تعذر تحميل قاعدة المعرفة. يرجى التحقق من الملف وتنسيقه.")
+    st.stop()
 
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-def load_knowledge_base() -> list[dict[str, str]] | None:
-    """Load and validate FAQ entries from the local knowledge base."""
-    knowledge_base_path = PROJECT_DIR / "knowledge_base.json"
-    try:
-        with knowledge_base_path.open("r", encoding="utf-8") as file:
-            knowledge_base: Any = json.load(file)
-    except FileNotFoundError:
-        st.error("تعذر العثور على ملف قاعدة المعرفة knowledge_base.json.")
-        return None
-    except json.JSONDecodeError:
-        st.error("ملف قاعدة المعرفة يحتوي على JSON غير صالح.")
-        return None
-    except OSError:
-        st.error("تعذر قراءة ملف قاعدة المعرفة.")
-        return None
-
-    if not isinstance(knowledge_base, dict) or not knowledge_base:
-        st.error("قاعدة المعرفة فارغة أو بتنسيق غير صالح.")
-        return None
-
-    entries = knowledge_base.get("knowledge_base")
-    if not isinstance(entries, list) or not entries or not all(
-        isinstance(entry, dict)
-        and isinstance(entry.get("question"), str)
-        and isinstance(entry.get("answer"), str)
-        and entry["question"].strip()
-        and entry["answer"].strip()
-        for entry in entries
-    ):
-        st.error("قاعدة المعرفة لا تحتوي على معلومات صالحة.")
-        return None
-
-    return entries
-
-
-def normalize_arabic(text: str) -> str:
-    """Normalize Arabic text to make FAQ matching tolerant of punctuation."""
-    text = text.lower()
-    text = re.sub(r"[ًٌٍَُِّْـ]", "", text)
-    text = re.sub(r"[إأآا]", "ا", text)
-    text = re.sub(r"[ؤئ]", "ء", text)
-    text = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
-    return " ".join(text.split())
-
-
-def answer_from_knowledge_base(
-    user_input: str, entries: list[dict[str, str]]
-) -> str:
-    """Return an answer only when a local FAQ entry is a confident match."""
-    normalized_input = normalize_arabic(user_input)
-    if not normalized_input:
-        return FALLBACK_MESSAGE
-
-    input_words = set(normalized_input.split())
-    best_entry: dict[str, str] | None = None
-    best_score = 0.0
-
-    for entry in entries:
-        question = normalize_arabic(entry["question"])
-        if normalized_input == question or normalized_input in question or question in normalized_input:
-            return entry["answer"]
-
-        question_words = set(question.split())
-        score = len(input_words & question_words) / max(len(question_words), 1)
-        if score > best_score:
-            best_score = score
-            best_entry = entry
-
-    if best_entry is not None and best_score >= 0.5:
-        return best_entry["answer"]
-    return FALLBACK_MESSAGE
-
-
-def display_chat_history() -> None:
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-
-def get_response_text(response: Any) -> str:
-    """Return usable response text, or the required fallback message."""
-    response_text = getattr(response, "text", None)
-    if isinstance(response_text, str) and response_text.strip():
-        return response_text.strip()
-    return FALLBACK_MESSAGE
-
-
-def main() -> None:
-    st.title("🤖 عطور الأريج - خدمة العملاء")
-    st.write("أهلاً بك! كيف يمكنني مساعدتك اليوم؟")
-
-    entries = load_knowledge_base()
-    if entries is None:
-        st.stop()
-
-    if "messages" not in st.session_state:
+with st.sidebar:
+    st.markdown('<div class="side-brand">الأريج ✦</div><div class="side-en">AL AREEJ · PERFUMES</div>', unsafe_allow_html=True)
+    st.markdown("### مساعد المتجر")
+    st.write("كل ما تحتاج معرفته عن عطورنا، في محادثة واحدة.")
+    st.divider()
+    st.markdown("**مواضيع يمكنني مساعدتك بها**")
+    st.write("الشحن والتوصيل · الأسعار · الدفع\n\nالاستبدال والاسترجاع · اختيار العطور")
+    if st.button("＋ محادثة جديدة", use_container_width=True):
         st.session_state.messages = []
+        st.rerun()
+    if st.session_state.messages:
+        transcript = "\n\n".join(("أنت" if m["role"] == "user" else "المساعد") + ": " + m["content"] for m in st.session_state.messages)
+        st.download_button("↓ حفظ المحادثة", transcript, "alareej-chat.txt", "text/plain", use_container_width=True)
+    st.markdown('<div class="side-note">نموذج أعمال تجريبي · بيانات متجر توضيحية<br>إجابات من قاعدة معرفة محلية، دون اتصال بنموذج لغوي.<br>تُحفظ المحادثة في جلسة المتصفح الحالية فقط.</div>', unsafe_allow_html=True)
 
-    display_chat_history()
+st.markdown('<div class="hero"><div class="eyebrow">تجربة خدمة عملاء عربية</div><h1>أهلاً بك في عالم الأريج ✦</h1><p>عطر يعبّر عنك، ومساعدة أقرب إليك.<br>اسأل عن منتجاتنا أو الشحن أو سياسات المتجر، وسأساعدك بالمعلومات المتاحة.</p><span class="badge">● متاح للتجربة &nbsp; | &nbsp; قاعدة معرفة المتجر</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="section-label">ابدأ بسؤال سريع</div>', unsafe_allow_html=True)
+examples = [("🚚 الشحن والتوصيل", "هل يوجد توصيل للمحافظات؟"), ("↩ الاستبدال والاسترجاع", "ما هي سياسة الاسترجاع والاستبدال؟"), ("✦ اختيار عطرك", "كيف أختار العطر المناسب لفصل الصيف؟")]
+selected = None
+for column, (label, question) in zip(st.columns(3), examples):
+    if column.button(label, use_container_width=True):
+        selected = question
+st.markdown('<div class="section-label">محادثتك مع مساعد الأريج</div>', unsafe_allow_html=True)
+with st.chat_message("assistant", avatar="🤖"):
+    st.write("أهلاً بك! أنا مساعد الأريج. كيف يمكنني مساعدتك اليوم؟")
+for message in st.session_state.messages:
+    with st.chat_message(message["role"], avatar="🤖" if message["role"] == "assistant" else "👤"):
+        st.write(message["content"])
 
-    if user_input := st.chat_input("اكتب سؤالك هنا..."):
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        with st.chat_message("user"):
-            st.markdown(user_input)
-
-        with st.chat_message("assistant"):
-            answer = answer_from_knowledge_base(user_input, entries)
-            st.session_state.messages.append({"role": "assistant", "content": answer})
-            st.markdown(answer)
-
-
-if __name__ == "__main__":
-    main()
+prompt = st.chat_input("اكتب سؤالك هنا…", max_chars=1000)
+if selected or prompt:
+    question = selected or prompt
+    answer = answer_from_knowledge_base(question, data["knowledge_base"])
+    st.session_state.messages.extend([{"role": "user", "content": question}, {"role": "assistant", "content": answer}])
+    st.rerun()
